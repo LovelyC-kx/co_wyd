@@ -4,6 +4,30 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+class ThresholdDependentBatchNorm2d(layer.ThresholdDependentBatchNorm2d):
+    """Keep SpikingJelly tdBN math/state; supply PyTorch's dimension check.
+
+    SpikingJelly 0.0.0.0.14 inherits _BatchNorm without implementing this
+    abstract check. It receives NCHW after the library folds time into batch.
+    """
+    def _check_input_dim(self, input):
+        if input.dim() != 4:
+            raise ValueError(f'tdBN expects folded NCHW, got {input.dim()}D')
+
+class MultiDimensionalAttention(layer.MultiDimensionalAttention, nn.Module):
+    """Register the library attention submodules and its intended final ReLU.
+
+    PyPI 0.0.0.0.14 omits nn.Module inheritance and self.relu despite using
+    self.relu in forward. Keep its time/channel/spatial attention computation;
+    make the existing weights participate in .to(), state_dict and optimizer.
+    """
+    def __init__(self, *args, **kwargs):
+        nn.Module.__init__(self)
+        layer.MultiDimensionalAttention.__init__(self, *args, **kwargs)
+        self.relu = nn.ReLU()
+
+
 v_th = 0.15
 
 alpha = 1 / (2 ** 0.5)
@@ -186,22 +210,22 @@ class SUNet_Level1_Block(nn.Module):
         
         # 5. Two processing blocks: [LIF-Conv2d-BatchNorm-MultiDimensionalAttention]
         # First processing block
-        self.lif_1 = LIFNode(v_threshold=v_th, backend='cupy', step_mode='m', decay_input=False)
+        self.lif_1 = LIFNode(v_threshold=v_th, backend='torch', step_mode='m', decay_input=False)
         self.conv_1 = layer.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, bias=False, step_mode='m')
-        self.bn_1 = layer.ThresholdDependentBatchNorm2d(num_features=dim, alpha=alpha, v_th=v_th, affine=True)
-        self.attn_1 = layer.MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
+        self.bn_1 = ThresholdDependentBatchNorm2d(num_features=dim, alpha=alpha, v_th=v_th, affine=True)
+        self.attn_1 = MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
         
         # Second processing block
-        self.lif_2 = LIFNode(v_threshold=v_th, backend='cupy', step_mode='m', decay_input=False)
+        self.lif_2 = LIFNode(v_threshold=v_th, backend='torch', step_mode='m', decay_input=False)
         self.conv_2 = layer.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, bias=False, step_mode='m')
-        self.bn_2 = layer.ThresholdDependentBatchNorm2d(num_features=dim, alpha=alpha, v_th=v_th, affine=True)
-        self.attn_2 = layer.MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
+        self.bn_2 = ThresholdDependentBatchNorm2d(num_features=dim, alpha=alpha, v_th=v_th, affine=True)
+        self.attn_2 = MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
         
         # 6. Upsampling layer (using bilinear interpolation)
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         
         # 7. Final MultiDimensionalAttention
-        self.final_attn = layer.MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
+        self.final_attn = MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
     
     def forward(self, x):
         # 1. Pass through Initial Spiking_Residual_Block
@@ -301,9 +325,9 @@ class Spiking_Residual_Block(nn.Module):
         functional.set_step_mode(self, step_mode='m')
         
         # Use traditional LIF as high-frequency filter
-        self.lif_1 = LIFNode(v_threshold=v_th, backend='cupy', step_mode='m', decay_input=False)
+        self.lif_1 = LIFNode(v_threshold=v_th, backend='torch', step_mode='m', decay_input=False)
         self.conv1 = layer.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, bias=False, step_mode='m')
-        self.bn1 = layer.ThresholdDependentBatchNorm2d(num_features=dim, alpha=alpha, v_th=v_th, affine=True)
+        self.bn1 = ThresholdDependentBatchNorm2d(num_features=dim, alpha=alpha, v_th=v_th, affine=True)
         
         # Learnable parameters to scale high and low frequency features (1st group)
         self.high_freq_scale_1 = nn.Parameter(torch.ones(1))
@@ -312,7 +336,7 @@ class Spiking_Residual_Block(nn.Module):
         # Use PixelShuffleLIFBlock as high-frequency filter (2nd group)
         self.lif_2 = PixelShuffleLIFBlock(in_channels=dim, downsample_factor=2)
         self.conv2 = layer.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, bias=False, step_mode='m')
-        self.bn2 = layer.ThresholdDependentBatchNorm2d(num_features=dim, alpha=alpha, v_th=v_th * 0.2, affine=True)
+        self.bn2 = ThresholdDependentBatchNorm2d(num_features=dim, alpha=alpha, v_th=v_th * 0.2, affine=True)
         
         # Learnable parameters to scale high and low frequency features (2nd group)
         self.high_freq_scale_2 = nn.Parameter(torch.ones(1))
@@ -321,11 +345,11 @@ class Spiking_Residual_Block(nn.Module):
         self.shortcut = nn.Sequential(
             layer.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1,
                          bias=False, step_mode='m'),
-            layer.ThresholdDependentBatchNorm2d(num_features=dim, alpha=alpha,
+            ThresholdDependentBatchNorm2d(num_features=dim, alpha=alpha,
                                                 v_th=v_th, affine=True),
         )
 
-        self.attn = layer.MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
+        self.attn = MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
 
     def forward(self, x):
         # 1st group: Use LIF as high-frequency filter
@@ -383,9 +407,9 @@ class DownSampling(nn.Module):
         functional.set_step_mode(self, step_mode='m')
         
         # Use traditional LIF instead of PixelShuffleLIFBlock
-        self.lif = LIFNode(v_threshold=v_th, backend='cupy', step_mode='m', decay_input=False)
+        self.lif = LIFNode(v_threshold=v_th, backend='torch', step_mode='m', decay_input=False)
         self.conv = layer.Conv2d(dim, dim * 2, kernel_size=3, stride=2, padding=1, step_mode='m', bias=False)
-        self.bn = layer.ThresholdDependentBatchNorm2d(alpha=alpha, v_th=v_th, num_features=dim * 2, affine=True)
+        self.bn = ThresholdDependentBatchNorm2d(alpha=alpha, v_th=v_th, num_features=dim * 2, affine=True)
 
     def forward(self, x):
         x = self.lif(x)
@@ -400,20 +424,18 @@ class UpSampling(nn.Module):
         self.scale_factor = 2
         
         # Use traditional LIF instead of PixelShuffleLIFBlock
-        self.lif = LIFNode(v_threshold=v_th, backend='cupy', step_mode='m', decay_input=False)
+        self.lif = LIFNode(v_threshold=v_th, backend='torch', step_mode='m', decay_input=False)
         self.conv = layer.Conv2d(dim, dim // 2, kernel_size=3, stride=1, padding=1, step_mode='m', bias=False)
-        self.bn = layer.ThresholdDependentBatchNorm2d(alpha=alpha, v_th=v_th, num_features=dim // 2, affine=True)
+        self.bn = ThresholdDependentBatchNorm2d(alpha=alpha, v_th=v_th, num_features=dim // 2, affine=True)
 
     def forward(self, input):
-        # First perform bilinear interpolation upsampling
-        temp = torch.zeros((input.shape[0], input.shape[1], input.shape[2], input.shape[3] * self.scale_factor,
-                            input.shape[4] * self.scale_factor)).cuda()
-        output = []
-        for i in range(input.shape[0]):
-            temp[i] = F.interpolate(input[i], scale_factor=self.scale_factor, mode='bilinear')
-            output.append(temp[i])
-        out = torch.stack(output, dim=0)
-        
+        # Same bilinear computation; preserve the input device/dtype and gradients.
+        T, B, C, H, W = input.shape
+        out = F.interpolate(input.reshape(T * B, C, H, W),
+                            scale_factor=self.scale_factor, mode='bilinear',
+                            align_corners=False)
+        out = out.reshape(T, B, C, out.shape[-2], out.shape[-1])
+
         # Then pass through traditional LIF and convolution layers
         out = self.lif(out)
         out = self.conv(out)
@@ -426,9 +448,11 @@ class VLIFNet(nn.Module):
                  bias=False, T=4, use_refinement=False):
         super(VLIFNet, self).__init__()
 
-        functional.set_backend(self, backend='cupy')
+        functional.set_backend(self, backend='torch')
         functional.set_step_mode(self, step_mode='m')
 
+        if T != 4:
+            raise ValueError('This architecture fixes attention at T=4; use T=4')
         self.T = T
         self.use_refinement = use_refinement
         self.patch_embed = OverlapPatchEmbed(in_c=inp_channels, embed_dim=dim, T=T)
@@ -449,9 +473,9 @@ class VLIFNet(nn.Module):
         self.up3_2 = UpSampling(int(dim * 2 ** 2))  ## From Level 3 to Level 2
 
         # Use traditional LIF instead of PixelShuffleLIFBlock
-        self.lif_level2 = LIFNode(v_threshold=v_th, backend='cupy', step_mode='m', decay_input=False)
+        self.lif_level2 = LIFNode(v_threshold=v_th, backend='torch', step_mode='m', decay_input=False)
         self.reduce_conv_level2 = layer.Conv2d(int(dim * 2 ** 2), int(dim * 2 ** 1), kernel_size=1, bias=bias, step_mode='m')
-        self.reduce_bn_level2 = layer.ThresholdDependentBatchNorm2d(num_features=int(dim * 2 ** 1), alpha=alpha, v_th=v_th)
+        self.reduce_bn_level2 = ThresholdDependentBatchNorm2d(num_features=int(dim * 2 ** 1), alpha=alpha, v_th=v_th)
 
         self.decoder_level2 = nn.Sequential(*[
             Spiking_Residual_Block(dim=int(dim * 2 ** 1)) for i in range(de_num_blocks[1])])
@@ -459,9 +483,9 @@ class VLIFNet(nn.Module):
         self.up2_1 = UpSampling(int(dim * 2 ** 1))  ## From Level 2 to Level 1  (NO 1x1 conv to reduce channels)
 
         # Use traditional LIF instead of PixelShuffleLIFBlock
-        self.lif_level1 = LIFNode(v_threshold=v_th, backend='cupy', step_mode='m', decay_input=False)
+        self.lif_level1 = LIFNode(v_threshold=v_th, backend='torch', step_mode='m', decay_input=False)
         self.reduce_conv_level1 = layer.Conv2d(int(dim * 2 ** 1), int(dim * 2 ** 0), kernel_size=1, bias=bias, step_mode='m')
-        self.reduce_bn_level1 = layer.ThresholdDependentBatchNorm2d(num_features=int(dim * 2 ** 0), alpha=alpha, v_th=v_th)
+        self.reduce_bn_level1 = ThresholdDependentBatchNorm2d(num_features=int(dim * 2 ** 0), alpha=alpha, v_th=v_th)
 
         # Use SUNet_Level1_Block instead of the original Spiking_Residual_Block sequence
         self.decoder_level1 = SUNet_Level1_Block(dim=int(dim * 2 ** 0))
@@ -481,6 +505,10 @@ class VLIFNet(nn.Module):
         )
 
     def forward(self, inp_img):
+        if inp_img.ndim != 4 or inp_img.shape[1] != 3:
+            raise ValueError('VLIFNet expects BCHW RGB (three channels)')
+        if inp_img.shape[-2] % 8 or inp_img.shape[-1] % 8:
+            raise ValueError('VLIFNet height/width must be divisible by 8; use the SR adapter')
         short = inp_img.clone()
         ############ Repeat Feature  ################
         if len(inp_img.shape) < 5:
@@ -530,5 +558,11 @@ class VLIFNet(nn.Module):
         return out_dec_level1
 
 
-def model(use_refinement=False):
-    return VLIFNet(dim=48, en_num_blocks=[4, 4, 8, 8], de_num_blocks=[2, 2, 2, 2], T=4, use_refinement=use_refinement).cuda()
+def model(use_refinement=False, device=None, backend='torch'):
+    # Keep the uploaded network widths, active block counts and T unchanged.
+    network = VLIFNet(dim=48, en_num_blocks=[4, 4, 8, 8],
+                      de_num_blocks=[2, 2, 2, 2], T=4,
+                      use_refinement=use_refinement)
+    functional.set_step_mode(network, step_mode='m')
+    functional.set_backend(network, backend=backend)
+    return network.to(device) if device is not None else network

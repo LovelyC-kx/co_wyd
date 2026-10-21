@@ -1,341 +1,198 @@
-import os
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = '0'
-import torch
-torch.backends.cudnn.benchmark = True
-import torch.optim as optim
-from torch.utils.data import DataLoader
-import random
-from dataset_load import Dataload
-import time
-import utils
-from model import model
-from warmup_scheduler import GradualWarmupScheduler
-from tqdm import tqdm
-from losses import *
-from torch.utils.tensorboard import SummaryWriter
+"""Train the uploaded VLIF model on the declared THz-Net-style DIV2K protocol."""
 import argparse
-from spikingjelly.activation_based import functional
-import numpy as np
-from PIL import Image
-import torchvision.transforms as transforms
-import torchvision.utils as vutils
-from thop import profile
+from dataclasses import replace
+import importlib.metadata
+import inspect
+import json
+from pathlib import Path
+import random
+import time
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+from dataset_load import DIV2KDataset
+from metrics import json_scores
+from sr_runtime import SRAdapter, build_model, evaluate
+from thz_protocol import Protocol, file_sha256, fingerprint, write_json
 
-def save_sample_images(input_img, target_img, restored_img, save_path, epoch, batch_idx, num_samples=4):
-    """
-    Save sample images (input, target, restored) for visualization
-    Stitch multiple samples into one row for easy comparison
-    """
-    # Select first num_samples from the batch
-    num_samples = min(num_samples, input_img.shape[0])
-    
-    # Prepare images for stitching
-    input_samples = input_img[:num_samples]
-    target_samples = target_img[:num_samples]
-    restored_samples = restored_img[:num_samples]
-    
-    # Create a grid with 3 rows (input, target, restored) and num_samples columns
-    grid_images = []
-    
-    # Input images row
-    grid_images.append(input_samples)
-    # Target images row  
-    grid_images.append(target_samples)
-    # Restored images row
-    grid_images.append(restored_samples)
-    
-    # Concatenate all rows
-    full_grid = torch.cat(grid_images, dim=0)
-    
-    # Create grid layout: 3 rows x num_samples columns
-    grid = vutils.make_grid(full_grid, nrow=num_samples, padding=2, normalize=False)
-    
-    # Convert to PIL image and save
-    grid_np = grid.cpu().detach().numpy().transpose(1, 2, 0)
-    grid_np = np.clip(grid_np * 255, 0, 255).astype(np.uint8)
-    grid_pil = Image.fromarray(grid_np)
-    
-    # Save only the stitched comparison image
-    grid_pil.save(os.path.join(save_path, f'epoch_{epoch}_batch_{batch_idx}_comparison.png'))
 
-if __name__ == "__main__":
-    ######### Set Seeds ###########
-    random.seed(1234)
-    np.random.seed(1234)
-    torch.manual_seed(1234)
-    torch.cuda.manual_seed_all(1234)
-    start_epoch = 1
+DEFAULT_CONFIG = Path(__file__).parent / 'configs' / 'thznet_div2k.json'
 
-    parser = argparse.ArgumentParser(description='Image Deraining')
-    parser.add_argument('--train_dir', default='', type=str,
-                        help='Directory of train images')
-    parser.add_argument('--val_dir', default='', type=str,
-                        help='Directory of validation images')
-    parser.add_argument('--model_save_dir', default='./checkpoints/', type=str, help='Path to save weights')
-    parser.add_argument('--pretrain_weights', default='./checkpoints/model_best.pth', type=str,
-                        help='Path to pretrain-weights')
-    parser.add_argument('--mode', default='VLIFNet', type=str)
-    parser.add_argument('--session', default='DID-Data_new', type=str, help='session')
-    parser.add_argument('--patch_size_train', default=64, type=int, help='training patch size')
-    parser.add_argument('--patch_size_test', default=64, type=int, help='val patch size')
-    parser.add_argument('--num_epochs', default=1000, type=int, help='num_epochs')
-    parser.add_argument('--batch_size', default=12, type=int, help='batch_size')
-    parser.add_argument('--val_epochs', default=10, type=int, help='val_epochs')
-    parser.add_argument('--lr', default=1e-3, type=int, help='LearningRate')
-    parser.add_argument('--min_lr', default=1e-7, type=int, help='min_LearningRate')
-    parser.add_argument('--warmup_epochs', default=3, type=int, help='warmup_epochs')
-    parser.add_argument('--clip_grad', default=1.0, type=float, help='clip_grad')
-    parser.add_argument('--use_amp', default=False, type=bool, help='use_amp')
-    parser.add_argument('--num_workers', default=2, type=int, help='num_workers')
-    parser.add_argument('--name', default='RainH200', type=str, help='Dataset name: RainL200, RainH200, or Rain1200')
-    args = parser.parse_args()
 
-    start_lr = args.lr
-    end_lr = args.min_lr
-    clip_grad = args.clip_grad
-    use_amp = args.use_amp
-    mode = args.mode
-    session = args.session
-    patch_size_train = args.patch_size_train
-    patch_size_test = args.patch_size_test
-    model_dir = os.path.join(args.model_save_dir, mode, 'models', session)
-    utils.mkdir(model_dir)
-    
-    # Create directories for saving sample images
-    sample_dir = os.path.join(args.model_save_dir, mode, 'samples', session)
-    utils.mkdir(sample_dir)
-    train_sample_dir = os.path.join(sample_dir, 'train_samples')
-    val_sample_dir = os.path.join(sample_dir, 'val_samples')
-    utils.mkdir(train_sample_dir)
-    utils.mkdir(val_sample_dir)
-    train_dir = args.train_dir
-    val_dir = args.val_dir
-    num_epochs = args.num_epochs
-    batch_size = args.batch_size
-    val_epochs = args.val_epochs
-    num_workers = args.num_workers
+def parser():
+    result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument('--data-root', required=True, type=Path)
+    result.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
+    result.add_argument('--output', type=Path, default=Path('runs/vlif_div2k_x2'))
+    result.add_argument('--scale', type=int, choices=(2, 3, 4))
+    result.add_argument('--epochs', type=int)
+    result.add_argument('--batch-size', type=int)
+    result.add_argument('--patch-size', type=int, help='HR patch size; manuscript leaves HR/LR convention unspecified')
+    result.add_argument('--lr', type=float)
+    result.add_argument('--blur-sigma', type=float, help='Chosen PSF sigma in HR pixels; NOT specified in paper')
+    result.add_argument('--noise-std', type=float, help='Chosen noise std in normalized [0,1] units; NOT specified in paper')
+    result.add_argument('--workers', type=int, default=2)
+    result.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
+    result.add_argument('--backend', choices=('torch', 'cupy'), default='torch')
+    result.add_argument('--model-factory', default='model:model')
+    result.add_argument('--model-kwargs', default='{}', help='JSON object of model constructor arguments')
+    result.add_argument('--model-input', choices=('bicubic', 'native'), default='bicubic')
+    result.add_argument('--spatial-multiple', type=int, default=8)
+    result.add_argument('--tile-size', type=int, default=192, help='Model-input pixels; 0 disables tiling')
+    result.add_argument('--overlap', type=int, default=32)
+    result.add_argument('--val-every', type=int, default=1)
+    result.add_argument('--resume', type=Path)
+    result.add_argument('--allow-partial', action='store_true', help='Smoke tests only; incomplete data are marked in manifest')
+    result.add_argument('--max-train-steps', type=int, help='Smoke tests only')
+    result.add_argument('--max-val-images', type=int, help='Smoke tests only')
+    return result
 
-    ######### Model ###########
-    # Determine whether to use refinement blocks based on dataset name
-    use_refinement = (args.name == 'RainL200')
-    model_restoration = model(use_refinement=use_refinement)
-    model_restoration.cuda()
 
-    functional.set_step_mode(model_restoration, step_mode='m')
-    functional.set_backend(model_restoration, backend='cupy')
-
-    # print number of model
-    # get_parameter_number(model_restoration)
-    # device_ids = 0
-    device_ids = [i for i in range(torch.cuda.device_count())]
-    print(device_ids)
-    if torch.cuda.device_count() > 1:
-        print("\n\nLet's use", torch.cuda.device_count(), "GPUs!\n\n")
-    optimizer = optim.AdamW(model_restoration.parameters(), lr=start_lr, betas=(0.9, 0.999), eps=1e-8)
-
-    ######### Scheduler ###########
-    warmup_epochs = args.warmup_epochs
-
-    scheduler_cosine = optim.lr_scheduler.CosineAnnealingLR(optimizer, num_epochs - warmup_epochs, eta_min=end_lr)
-
-    # scheduler_cosine = optim.lr_scheduler.StepLR(step_size=50, gamma=0.8,
-    #                                       optimizer=optimizer)  ####step_size epoch, best_epoch 445
-
-    scheduler = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=warmup_epochs,
-                                       after_scheduler=scheduler_cosine)
-
-    # scheduler.step()
-    RESUME = False
-    Pretrain = False
-    model_pre_dir = 'checkpoints/VLIFNet/models/DID-Data'
-    ######### Pretrain ###########
-    if Pretrain:
-        utils.load_checkpoint(model_restoration, model_pre_dir)
-
-        print('------------------------------------------------------------------------------')
-        print("==> Retrain Training with: " + model_pre_dir)
-        print('------------------------------------------------------------------------------')
-
-    ######### Resume ###########
-    if RESUME:
-        path_chk_rest = utils.get_last_path(model_pre_dir, '_last.pth')
-        utils.load_checkpoint(model_restoration, path_chk_rest)
-        start_epoch = utils.load_start_epoch(path_chk_rest) + 1
-        utils.load_optim(optimizer, path_chk_rest)
-        # model_restoration.load_state_dict(torch.load(model_pre_dir))
-        for i in range(1, start_epoch):
-            scheduler.step()
-        new_lr = scheduler.get_lr()[0]
-        print('------------------------------------------------------------------------------')
-        print("==> Resuming Training with learning rate:", new_lr)
-        print('------------------------------------------------------------------------------')
-
-    if len(device_ids) > 1:
-        model_restoration = nn.DataParallel(model_restoration, device_ids=device_ids)
-
-    ######### Loss ###########
-    # criterion = nn.MSELoss().cuda()
-    criterion_ssim = utils.SSIM().cuda()
-    # criterion_L1 = nn.SmoothL1Loss().cuda()
-    criterion_psnr = PSNRLoss().cuda()
-    ######### DataLoaders ###########
-
-    dataset_train = Dataload(data_dir=train_dir, patch_size=patch_size_train)
-    train_loader = DataLoader(dataset=dataset_train, num_workers=num_workers, batch_size=batch_size, shuffle=True, drop_last=False,
-                              pin_memory=True)
-
-    dataset_val = Dataload(data_dir=val_dir, patch_size=patch_size_test)
-    val_loader = DataLoader(dataset=dataset_val, num_workers=1, batch_size=batch_size, shuffle=False, drop_last=False,
-                            pin_memory=True)
-    # train_dataset = get_training_data(train_dir, {'patch_size': patch_size_train})
-    # train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers,
-    #                           drop_last=False,
-    #                           pin_memory=True)
-    #
-    # val_dataset = get_validation_data(val_dir, {'patch_size': patch_size_test})
-    # val_loader = DataLoader(dataset=val_dataset, batch_size=1, shuffle=False, num_workers=num_workers, drop_last=False,
-    #                         pin_memory=True)
-
-    print('===> Start Epoch {} End Epoch {}'.format(start_epoch, num_epochs + 1))
-    print('===> Loading datasets')
-    
-    # Calculate FLOPs and Parameters
-    print('=' * 80)
-    print('MODEL INFORMATION:')
-    print('=' * 80)
-    x = torch.rand(1, 3, 256, 256).cuda()
-    functional.set_step_mode(model_restoration, step_mode='m')
-    functional.set_backend(model_restoration, backend='cupy')
-    flops, params = profile(model_restoration, inputs=(x,), verbose=False)
-    print('FLOPs = ' + str(flops / 1000 ** 3) + 'G')
-    print('Params = ' + str(params / 1000 ** 2) + 'M')
-    print('=' * 80)
-    
-    # Reset model state
-    functional.reset_net(model_restoration)
-    
-    # Print hyperparameters
-    print('=' * 80)
-    print('HYPERPARAMETERS:')
-    print('=' * 80)
-    print(f'Mode: {mode}')
-    print(f'Session: {session}')
-    print(f'Training Directory: {train_dir}')
-    print(f'Validation Directory: {val_dir}')
-    print(f'Model Save Directory: {model_dir}')
-    print(f'Sample Save Directory: {sample_dir}')
-    print(f'Number of Epochs: {num_epochs}')
-    print(f'Batch Size: {batch_size}')
-    print(f'Validation Frequency: Every {val_epochs} epochs')
-    print(f'Patch Size (Train): {patch_size_train}')
-    print(f'Patch Size (Test): {patch_size_test}')
-    print(f'Learning Rate: {start_lr}')
-    print(f'Minimum Learning Rate: {end_lr}')
-    print(f'Warmup Epochs: {warmup_epochs}')
-    print(f'Gradient Clipping: {clip_grad}')
-    print(f'Mixed Precision (AMP): {use_amp}')
-    print(f'Number of Workers: {num_workers}')
-    print(f'Number of GPUs: {len(device_ids)}')
-    print(f'Device IDs: {device_ids}')
-    print('=' * 80)
-
-    best_psnr = 0
-    best_epoch = 0
-    writer = SummaryWriter(model_dir)
-    iter = 0
-    scaler = torch.cuda.amp.GradScaler()
-
-    for epoch in range(start_epoch, num_epochs + 1):
-        epoch_start_time = time.time()
-        epoch_loss = 0
-        train_id = 1
-        train_psnr_val_rgb = []
-        scaled_loss = 0
-        model_restoration.train()
-        # scheduler.step()
-        for i, data in enumerate(tqdm(train_loader, unit='img'), 0):
-            for param in model_restoration.parameters():
-                param.grad = None
-            target_ = data[1].cuda()
-            input_ = data[0].cuda()
-            restored = model_restoration(input_)
-            if use_amp:
-                with torch.cuda.amp.autocast():
-                    ssim = criterion_ssim(restored, target_)
-                    loss = 1 - ssim
-                scaler.scale(loss).backward()
-                # torch.nn.utils.clip_grad_norm_(model_restoration.parameters(), clip_grad)
-                scaler.step(optimizer)
-                scaler.update()
-                functional.reset_net(model_restoration)
-            else:
-                # L1_Loss = criterion_L1(restored, target_)
-                ssim = criterion_ssim(restored, target_)
-                psnr = criterion_psnr(restored, target_)
-                loss = 1-ssim
+def main(argv=None):
+    args = parser().parse_args(argv)
+    for name in ('val_every', 'spatial_multiple'):
+        if getattr(args, name) < 1:
+            raise ValueError(f'{name} must be positive')
+    for name in ('max_train_steps', 'max_val_images'):
+        if getattr(args, name) is not None and getattr(args, name) < 1:
+            raise ValueError(f'{name} must be positive')
+    if args.workers < 0 or args.tile_size < 0 or args.overlap < 0 or (
+            args.tile_size and args.overlap >= args.tile_size):
+        raise ValueError('Invalid workers/tile-size/overlap')
+    overrides = {field: getattr(args, arg) for arg, field in (
+        ('scale', 'scale'), ('epochs', 'epochs'), ('batch_size', 'batch_size'),
+        ('patch_size', 'hr_patch_size'), ('lr', 'learning_rate'),
+        ('blur_sigma', 'blur_sigma'), ('noise_std', 'noise_std'))
+        if getattr(args, arg) is not None}
+    protocol = replace(Protocol.load(args.config), **overrides)
+    spec = {'factory': args.model_factory, 'kwargs': json.loads(args.model_kwargs),
+            'input_mode': args.model_input, 'spatial_multiple': args.spatial_multiple}
+    if not isinstance(spec['kwargs'], dict):
+        raise ValueError('--model-kwargs must be a JSON object')
+    if args.output.exists() and any(args.output.iterdir()) and not args.resume:
+        raise FileExistsError('Output directory is nonempty; choose a new run or use --resume')
+    device = torch.device(args.device)
+    random.seed(protocol.seed)
+    torch.manual_seed(protocol.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(protocol.seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    train_set = DIV2KDataset(args.data_root, 'train', protocol, args.allow_partial)
+    valid_set = DIV2KDataset(args.data_root, 'valid', protocol, args.allow_partial)
+    datasets = {'train': train_set.manifest(), 'valid': valid_set.manifest()}
+    source_dir = Path(__file__).parent
+    data_code = {name: file_sha256(source_dir / name) for name in
+                 ('dataset_load.py', 'thz_protocol.py')}
+    versions = {name: importlib.metadata.version(name) for name in
+                ('torch', 'numpy', 'Pillow', 'scipy', 'spikingjelly', 'einops')}
+    data_hash = fingerprint({'protocol': protocol.to_dict(), 'datasets': datasets,
+                             'data_code': data_code, 'versions': versions})
+    network = build_model(spec, device, args.backend)
+    adapter = SRAdapter(network, protocol.scale, spec['input_mode'], spec['spatial_multiple'])
+    optimizer = torch.optim.Adam(network.parameters(), lr=protocol.learning_rate,
+                                 betas=(.9, .999), eps=1e-8, weight_decay=0)
+    criterion = nn.MSELoss()
+    start_epoch, best_psnr = 1, -float('inf')
+    model_source = Path(inspect.getfile(type(network)))
+    execution = {'tile_size': args.tile_size, 'overlap': args.overlap,
+                 'val_every': args.val_every, 'max_train_steps': args.max_train_steps,
+                 'max_val_images': args.max_val_images}
+    source_hashes = {name: file_sha256(source_dir / name) for name in
+                     ('train.py', 'test.py', 'sr_runtime.py', 'metrics.py')}
+    source_hashes['model_source'] = file_sha256(model_source)
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location='cpu', weights_only=True)
+        if (checkpoint['data_fingerprint'] != data_hash or checkpoint['model_spec'] != spec
+                or checkpoint['execution'] != execution or checkpoint['source_hashes'] != source_hashes):
+            raise ValueError('Resume requires identical data, protocol, source, model and execution settings')
+        network.load_state_dict(checkpoint['state_dict'], strict=True)
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_psnr = checkpoint['best_psnr_y']
+        torch.set_rng_state(checkpoint['torch_rng_state'])
+        if device.type == 'cuda' and checkpoint['cuda_rng_state']:
+            torch.cuda.set_rng_state_all(checkpoint['cuda_rng_state'])
+    if start_epoch > protocol.epochs:
+        raise ValueError('Checkpoint has already completed the configured epochs')
+    manifest = {
+        'protocol': protocol.to_dict(), 'model_spec': spec, 'versions': versions,
+        'data_fingerprint': data_hash, 'datasets': datasets, 'data_code': data_code,
+        'source_hashes': source_hashes, 'execution': execution,
+        'device': str(device), 'backend': args.backend,
+        'parameter_count': sum(p.numel() for p in network.parameters()),
+        'smoke_test': bool(args.allow_partial or args.max_train_steps or args.max_val_images),
+        'author_pipeline_exact': False,
+        'unpublished_author_details': ['PSF sigma/size', 'noise std', 'sampling implementation',
+                                      'patch HR/LR convention', 'Y conversion/SSIM/border details'],
+        'args': {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
+    }
+    args.output.mkdir(parents=True, exist_ok=True)
+    write_json(args.output / 'manifest.json', manifest)
+    print('Author degradation values are unpublished. This is the declared protocol, not an exact numerical reproduction.')
+    print(f'Data fingerprint: {data_hash}; parameters: {manifest["parameter_count"]:,}', flush=True)
+    for epoch in range(start_epoch, protocol.epochs + 1):
+        start = time.monotonic()
+        train_set.set_epoch(epoch)
+        generator = torch.Generator().manual_seed(protocol.seed + epoch)
+        loader = DataLoader(train_set, batch_size=protocol.batch_size, shuffle=True,
+                            num_workers=args.workers, drop_last=False,
+                            generator=generator, pin_memory=device.type == 'cuda')
+        adapter.train()
+        total_loss, seen, steps = 0., 0, 0
+        for index, batch in enumerate(loader):
+            if args.max_train_steps is not None and index >= args.max_train_steps:
+                break
+            lr, hr = batch['lr'].to(device), batch['hr'].to(device)
+            adapter.reset()
+            optimizer.zero_grad(set_to_none=True)
+            try:
+                prediction = adapter(lr)
+                if prediction.shape != hr.shape:
+                    raise ValueError('Prediction and clean HR target shapes differ')
+                loss = criterion(prediction, hr)  # RGB MSE, no clamp and no SSIM loss.
+                if not torch.isfinite(loss):
+                    raise FloatingPointError('Non-finite training loss')
                 loss.backward()
-                scaled_loss += loss.item()
-                # torch.nn.utils.clip_grad_norm_(model_restoration.parameters(), clip_grad)
                 optimizer.step()
-                functional.reset_net(model_restoration)
-            torch.cuda.synchronize()
-            epoch_loss += loss.item()
-            iter += 1
-            for res, tar in zip(restored, target_):
-                train_psnr_val_rgb.append(utils.torchPSNR(res, tar))
-            psnr_train = torch.stack(train_psnr_val_rgb).mean().item()
+            finally:
+                adapter.reset()
+            total_loss += float(loss.detach()) * lr.shape[0]
+            seen += lr.shape[0]
+            steps += 1
+        row = {'epoch': epoch, 'mse_rgb': total_loss / seen,
+               'train_images': seen, 'steps': steps, 'lr': optimizer.param_groups[0]['lr']}
+        is_best = False
+        if epoch % args.val_every == 0 or epoch == protocol.epochs:
+            means, rows = evaluate(adapter, valid_set, device, args.tile_size,
+                                   args.overlap, protocol.metric_border, args.workers,
+                                   args.max_val_images)
+            row.update(json_scores(means))
+            write_json(args.output / 'validation_latest.json', {
+                'epoch': epoch, 'data_fingerprint': data_hash,
+                'mean': json_scores(means),
+                'images': [dict(name=item['name'], **json_scores(
+                    {key: value for key, value in item.items() if key != 'name'})) for item in rows]})
+            if means['psnr_y'] > best_psnr:
+                best_psnr = means['psnr_y']
+                is_best = True
+        row['seconds'] = time.monotonic() - start
+        with (args.output / 'train.jsonl').open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps(row, allow_nan=False) + '\n')
+        checkpoint = {
+            'epoch': epoch, 'state_dict': network.state_dict(),
+            'optimizer': optimizer.state_dict(), 'best_psnr_y': best_psnr,
+            'protocol': protocol.to_dict(), 'model_spec': spec,
+            'data_fingerprint': data_hash, 'datasets': datasets, 'data_code': data_code, 'execution': execution,
+            'source_hashes': source_hashes, 'versions': versions,
+            'torch_rng_state': torch.get_rng_state(),
+            'cuda_rng_state': torch.cuda.get_rng_state_all() if device.type == 'cuda' else []
+        }
+        torch.save(checkpoint, args.output / 'model_last.pth')
+        if is_best:
+            torch.save(checkpoint, args.output / 'model_best.pth')
+        print(json.dumps(row, ensure_ascii=False), flush=True)
 
-            writer.add_scalar('loss/iter_loss', loss.item(), iter)
-            writer.add_scalar('loss/epoch_loss', epoch_loss, epoch)
-            writer.add_scalar('lr/epoch_loss', scheduler.get_lr()[0], epoch)
-            
-            # Save sample training images every 10 epochs
-            if epoch % 10 == 0 and i == 0:  # Save only first batch of every 10th epoch
-                save_sample_images(input_, target_, restored, train_sample_dir, epoch, i)
-        #### Evaluation ####
-        if epoch % val_epochs == 0:
-            model_restoration.eval()
-            psnr_val_rgb = []
-            val_sample_saved = False  # Flag to save only one sample per validation
-            for ii, data_val in enumerate(tqdm(val_loader, unit='img'), 0):
-                target = data_val[1].cuda()
-                input_ = data_val[0].cuda()
 
-                with torch.no_grad():
-                    restored = model_restoration(input_)
-                functional.reset_net(model_restoration)
-
-                for res, tar in zip(restored, target):
-                    psnr_val_rgb.append(utils.torchPSNR(res, tar))
-                
-                # Save sample validation images (only first batch)
-                if not val_sample_saved:
-                    save_sample_images(input_, target, restored, val_sample_dir, epoch, ii)
-                    val_sample_saved = True
-
-            psnr_val_rgb = torch.stack(psnr_val_rgb).mean().item()
-            writer.add_scalar('val/psnr', psnr_val_rgb, epoch)
-            if psnr_val_rgb > best_psnr:
-                best_psnr = psnr_val_rgb
-                best_epoch = epoch
-                torch.save(model_restoration.state_dict(), os.path.join(model_dir, "model_best.pth"))
-
-            print("[epoch %d Training PSNR: %.4f --- best_epoch %d Test_PSNR %.4f]" % (epoch, psnr_train, best_epoch, best_psnr))
-        if epoch % 50 == 0:
-            torch.save({'epoch': epoch,
-                        'state_dict': model_restoration.state_dict(),
-                        'optimizer': optimizer.state_dict()
-                        }, os.path.join(model_dir, f"model_epoch_{epoch}.pth"))
-        torch.save({'epoch': epoch,
-                    'state_dict': model_restoration.state_dict(),
-                    'optimizer': optimizer.state_dict()
-                    }, os.path.join(model_dir, "model_last.pth"))
-        scheduler.step()
-        print("-" * 150)
-        print(
-            "Epoch: {}\tTime: {:.4f}\tLoss: {:.4f}\tTrain_PSNR: {:.4f}\tSSIM: {:.4f}\tLearningRate {:.8f}\tTest_PSNR: {:.4f}".format(
-                epoch, time.time() - epoch_start_time, loss.item(), psnr_train, ssim, scheduler.get_lr()[0],
-                best_psnr, ))
-        print("-" * 150)
-    writer.close()
+if __name__ == '__main__':
+    main()
