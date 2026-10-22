@@ -1,0 +1,31 @@
+{
+  "note": "MACs are shape-exact (measured via hooks on random input); SNN activity uses the paper's measured r_bar=0.826 (dataset required to re-measure).",
+  "params_vlifnet": 2302901,
+  "macs_vlifnet": {
+    "conv2d": 4510789632.0,
+    "linear": 22080.0,
+    "conv3d": 28312320.0,
+    "eventful_conv2d_linear": 4510811712.0,
+    "total": 4539124032.0
+  },
+  "params_plain_unet": 1311603,
+  "macs_plain_unet": {
+    "Conv2d": 706019328.0,
+    "total": 706019328.0
+  },
+  "energy_mj": {
+    "ann_orbitann_T4": 20.8799705472,
+    "plain_unet": 3.2476889088,
+    "snn_lower_paper_semantics": 0.286896646506624,
+    "snn_lower_corrected_conv3d_dense": 0.417133318506624,
+    "snn_upper_conservative": 17.2695168529152
+  },
+  "ratios": {
+    "ann_over_snn_paper_semantics": 72.7787194498208,
+    "ann_over_snn_corrected": 50.05586852172881,
+    "ann_over_snn_upper": 1.2090651246954447,
+    "plain_over_snn_paper_semantics": 11.320065774017388,
+    "plain_over_snn_corrected": 7.7857336364954675,
+    "ann_T1_equivalent_over_snn_corrected": 12.513967130432203
+  }
+}
