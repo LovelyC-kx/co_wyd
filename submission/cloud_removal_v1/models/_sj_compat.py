@@ -1,8 +1,8 @@
 """spikingjelly 0.0.0.0.14 compatibility shims.
 
 Fixes two bugs that prevent VLIFNet from running on the current PyPI
-release of spikingjelly.  Applied by being imported at module-load time
-from ``vlifnet.py`` BEFORE any spikingjelly class is used.
+release of spikingjelly.  Used as local aliases by ``vlifnet.py``. No global spikingjelly classes
+are replaced, so importing this model cannot change another model.
 
 Bug 1: ThresholdDependentBatchNorm{1,2,3}d forgot to override
        _check_input_dim — seq_to_ann_forward raises NotImplementedError
@@ -13,8 +13,7 @@ Bug 2: MultiDimensionalAttention inherits only from MultiStepModule
        parent Module).  We replace the class with a proper nn.Module
        CBAM-style attention over [T, B, C, H, W].
 
-Both fixes are applied unconditionally at import; re-importing this
-module is idempotent.
+The local classes preserve the uploaded submission computations and state keys.
 """
 import torch
 import torch.nn as nn
@@ -38,12 +37,16 @@ def _tdbn_check_3d(self, x):
         raise ValueError(f"expected 5D input (got {x.dim()}D)")
 
 
-if hasattr(_sjlayer, "ThresholdDependentBatchNorm1d"):
-    _sjlayer.ThresholdDependentBatchNorm1d._check_input_dim = _tdbn_check_1d
-if hasattr(_sjlayer, "ThresholdDependentBatchNorm2d"):
-    _sjlayer.ThresholdDependentBatchNorm2d._check_input_dim = _tdbn_check_2d
-if hasattr(_sjlayer, "ThresholdDependentBatchNorm3d"):
-    _sjlayer.ThresholdDependentBatchNorm3d._check_input_dim = _tdbn_check_3d
+class ThresholdDependentBatchNorm1d(_sjlayer.ThresholdDependentBatchNorm1d):
+    _check_input_dim = _tdbn_check_1d
+
+
+class ThresholdDependentBatchNorm2d(_sjlayer.ThresholdDependentBatchNorm2d):
+    _check_input_dim = _tdbn_check_2d
+
+
+class ThresholdDependentBatchNorm3d(_sjlayer.ThresholdDependentBatchNorm3d):
+    _check_input_dim = _tdbn_check_3d
 
 
 # ---------- MultiDimensionalAttention replacement --------------------------
@@ -97,4 +100,4 @@ class _MDAttention(nn.Module):
         return x
 
 
-_sjlayer.MultiDimensionalAttention = _MDAttention
+MultiDimensionalAttention = _MDAttention

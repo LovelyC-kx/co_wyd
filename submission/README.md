@@ -6,6 +6,21 @@ Python packages below plus the listed dependencies are everything needed
 to reproduce the paper's experiments (the CUHK-CR dataset must be
 obtained separately, see §3).
 
+
+## THz / DIV2K 适配入口（本仓库）
+
+此目录的模型已接入与根目录旧模型相同的 `configs/thznet_div2k.json`：800/100、Adam+MSE、20 epochs、batch32、HR patch192、LR5e-6，沿用同一PSF/采样/噪声和Y通道评测。**本任务从 `co_wyd` 根目录运行下面的新入口。** 下方原始云去除/联邦脚本仍对应CUHK数据。
+
+```sh
+python -m submission.train_div2k --data-root data/DIV2K --backbone snn --output runs/submission_snn_x2
+python -m submission.test_div2k --data-root data/DIV2K --weights runs/submission_snn_x2/model_best.pth --output results/submission_snn_x2
+python -m submission.infer_measurement --opju "钥匙(1).opju" --normalization minmax --weights runs/submission_snn_x2/model_best.pth --output results/submission_key_x2
+```
+
+`--backbone ann` 和 `--backbone plain` 可选择同时上传的两个ANN版本。v1/v2共享同一模型，使用本入口训练不混入原云去除loss和联邦设置。
+
+[完整适配与钥匙数据说明](../docs/SUBMISSION_DIV2K_KEY.md)。OPJU默认通过已知配套的`wyd01(1).xls`读取数值；也支持Windows/Origin直接指定工作表读取。
+
 ## 1. Layout
 
 ```
@@ -43,7 +58,7 @@ directories side by side and run all commands from this directory.
 pip install -r requirements.txt
 ```
 
-`spikingjelly` MUST be `0.0.0.0.14` — `models/_sj_compat.py` patches two
+`spikingjelly` MUST be `0.0.0.0.14` — `models/_sj_compat.py` locally fixes two
 known bugs of exactly that release. Python ≥ 3.9, PyTorch ≥ 2.0 (CPU or
 CUDA). `tensorboard` is optional (training logs degrade gracefully
 without it).

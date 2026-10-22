@@ -1,8 +1,12 @@
 # ORBITALIF submission — pinned dependencies
 # Python >= 3.9
 torch>=2.0            # CPU or CUDA build both work
-spikingjelly==0.0.0.0.14   # REQUIRED exact version; _sj_compat.py patches this release
+spikingjelly==0.0.0.0.14   # REQUIRED exact version; _sj_compat.py provides local compatibility classes
 numpy>=1.24
 matplotlib>=3.7       # figure generation / plotting scripts
 Pillow>=9.0           # image I/O in dataset loaders
 # optional: tensorboard  (training curves; code degrades gracefully without it)
+
+# Shared DIV2K data and Y-channel evaluation pipeline
+scipy>=1.10
+einops>=0.6

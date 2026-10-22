@@ -23,7 +23,7 @@ identical to upstream.
 
 from spikingjelly.activation_based.neuron import LIFNode
 from spikingjelly.activation_based import functional, layer
-from . import _sj_compat  # noqa: F401  must run BEFORE any spikingjelly class is used
+from . import _sj_compat  # Local aliases; do not patch another model's library classes
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -118,7 +118,7 @@ def _make_bn(num_features: int, alpha: float, v_th: float,
     so existing VLIFNet sub-blocks can switch variant transparently.
     """
     if _BN_VARIANT == "tdbn":
-        return layer.ThresholdDependentBatchNorm2d(
+        return _sj_compat.ThresholdDependentBatchNorm2d(
             num_features=num_features, alpha=alpha, v_th=v_th, affine=affine)
     elif _BN_VARIANT == "bn2d":
         return StandardBN2dWrapper(
@@ -338,15 +338,15 @@ class SUNet_Level1_Block(nn.Module):
         self.conv_1 = layer.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, bias=False, step_mode="m")
         self.bn_1 = _make_bn(num_features=dim, alpha=alpha, v_th=v_th, affine=True)
         # T=4 hardcoded by upstream
-        self.attn_1 = layer.MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
+        self.attn_1 = _sj_compat.MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
 
         self.lif_2 = _make_lif_or_relu(v_threshold=v_th, decay_input=False)
         self.conv_2 = layer.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, bias=False, step_mode="m")
         self.bn_2 = _make_bn(num_features=dim, alpha=alpha, v_th=v_th, affine=True)
-        self.attn_2 = layer.MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
+        self.attn_2 = _sj_compat.MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
 
         self.upsample = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.final_attn = layer.MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
+        self.final_attn = _sj_compat.MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
         self.fre_mlp = FreMLPBlock(channels=dim, expand=2)
 
     def forward(self, x):
@@ -423,7 +423,7 @@ class Spiking_Residual_Block(nn.Module):
         )
 
         # T=4 hardcoded by upstream
-        self.attn = layer.MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
+        self.attn = _sj_compat.MultiDimensionalAttention(T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
         self.fsta = FSTAModule(channels=dim, T=4)
         # Cross-scale gate initialised to 0 → sigmoid gate starts at 0.5 but
         # the multiplicative path is x_h_1 * x_h_2, so the gate gradually

@@ -4,6 +4,7 @@ from pathlib import Path
 import torch
 from dataset_load import DIV2KDataset, PairedImageDataset
 from metrics import json_scores
+from model_provenance import verify_model_sources
 from sr_runtime import SRAdapter, build_model, evaluate
 from thz_protocol import Protocol, file_sha256, write_json
 
@@ -32,6 +33,7 @@ def main(argv=None):
     protocol = Protocol(**checkpoint['protocol'])
     spec = checkpoint['model_spec']
     device = torch.device(args.device)
+    verify_model_sources(checkpoint)
     # Detect changed model/runtime code rather than silently loading into a new architecture.
     import inspect
     network = build_model(spec, device, args.backend)

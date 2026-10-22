@@ -1,0 +1,14 @@
+{
+  "project": "钥匙(1).opju",
+  "project_sha256": "52017814cb6d25ef8e91ac950519f1a75c0ddd214e789025d29aea371e04090c",
+  "matrix": "wyd01(1).xls",
+  "matrix_sha256": "c47d8edf09a80cb7790b0d5919e7f57ec16e1d8213d6fcf7e10a68127b5c66a0",
+  "shape": [101, 101],
+  "origin_sheet": "[Book1]Sheet1",
+  "origin_sheet_type": "w",
+  "normalization": "minmax",
+  "polarity": "positive",
+  "units": "not supplied",
+  "physical_pixel_pitch": null,
+  "note": "Repository companion pair; checksums identify these files. Numeric worksheet equality requires the optional Origin reader. Min-max is an input mapping, not a transmission calibration."
+}

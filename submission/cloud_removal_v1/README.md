@@ -1,3 +1,5 @@
+> 本仓库 THz/DIV2K 对比请从 `co_wyd` 根目录运行 `python -m submission.train_div2k`，参见 [新入口与钥匙推理](../../docs/SUBMISSION_DIV2K_KEY.md)。下面保留的是原始云去除/联邦实验说明。v2共用v1模型。
+
 # cloud_removal_v1 — self-contained v1 package
 
 Decentralized federated learning with VLIFNet for optical cloud removal

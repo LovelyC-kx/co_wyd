@@ -12,6 +12,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from dataset_load import DIV2KDataset
 from metrics import json_scores
+from model_provenance import model_sources
 from sr_runtime import SRAdapter, build_model, evaluate
 from thz_protocol import Protocol, file_sha256, fingerprint, write_json
 
@@ -94,6 +95,7 @@ def main(argv=None):
                                  betas=(.9, .999), eps=1e-8, weight_decay=0)
     criterion = nn.MSELoss()
     start_epoch, best_psnr = 1, -float('inf')
+    component_sources = model_sources(network, spec)
     model_source = Path(inspect.getfile(type(network)))
     execution = {'tile_size': args.tile_size, 'overlap': args.overlap,
                  'val_every': args.val_every, 'max_train_steps': args.max_train_steps,
@@ -104,7 +106,8 @@ def main(argv=None):
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu', weights_only=True)
         if (checkpoint['data_fingerprint'] != data_hash or checkpoint['model_spec'] != spec
-                or checkpoint['execution'] != execution or checkpoint['source_hashes'] != source_hashes):
+                or checkpoint['execution'] != execution or checkpoint['source_hashes'] != source_hashes
+                or checkpoint.get('model_sources', component_sources) != component_sources):
             raise ValueError('Resume requires identical data, protocol, source, model and execution settings')
         network.load_state_dict(checkpoint['state_dict'], strict=True)
         optimizer.load_state_dict(checkpoint['optimizer'])
@@ -116,7 +119,7 @@ def main(argv=None):
     if start_epoch > protocol.epochs:
         raise ValueError('Checkpoint has already completed the configured epochs')
     manifest = {
-        'protocol': protocol.to_dict(), 'model_spec': spec, 'versions': versions,
+        'protocol': protocol.to_dict(), 'model_spec': spec, 'versions': versions, 'model_sources': component_sources,
         'data_fingerprint': data_hash, 'datasets': datasets, 'data_code': data_code,
         'source_hashes': source_hashes, 'execution': execution,
         'device': str(device), 'backend': args.backend,
@@ -182,7 +185,7 @@ def main(argv=None):
         checkpoint = {
             'epoch': epoch, 'state_dict': network.state_dict(),
             'optimizer': optimizer.state_dict(), 'best_psnr_y': best_psnr,
-            'protocol': protocol.to_dict(), 'model_spec': spec,
+            'protocol': protocol.to_dict(), 'model_spec': spec, 'model_sources': component_sources,
             'data_fingerprint': data_hash, 'datasets': datasets, 'data_code': data_code, 'execution': execution,
             'source_hashes': source_hashes, 'versions': versions,
             'torch_rng_state': torch.get_rng_state(),

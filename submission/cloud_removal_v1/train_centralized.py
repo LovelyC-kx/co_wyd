@@ -272,7 +272,8 @@ class _SingleGroupSRB(nn.Module):
             layer.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, bias=False, step_mode="m"),
             _make_bn(num_features=dim, alpha=alpha, v_th=v_th, affine=True),
         )
-        self.attn = layer.MultiDimensionalAttention(
+        from cloud_removal_v1.models._sj_compat import MultiDimensionalAttention
+        self.attn = MultiDimensionalAttention(
             T=4, reduction_t=4, reduction_c=16, kernel_size=3, C=dim)
         self.fsta = FSTAModule(channels=dim, T=4)
 

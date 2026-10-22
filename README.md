@@ -99,3 +99,22 @@ python -m pytest -q
 ## 出处与许可
 
 模型来自用户上传的 VLIF 修改版；[VLIF 上游项目](https://github.com/ChrisChen1023/VLIF) 与已有 MIT LICENSE 保留。原文为仓库内的 [THz-Net PDF](OE_THz_Net_Submission.pdf)。DIV2K 图像按数据集原始条款使用。
+
+## 新增 submission 模型与钥匙原始矩阵推理
+
+`submission` 内的 ORBITALIF 模型已接入相同 DIV2K 配置；无需另建退化数据或调用原云去除训练脚本。
+
+```sh
+python -m submission.train_div2k --data-root data/DIV2K --output runs/submission_snn_x2
+python -m submission.test_div2k --data-root data/DIV2K --weights runs/submission_snn_x2/model_best.pth --output results/submission_snn_x2
+```
+
+对新增的钥匙OPJU和`wyd01(1).xls`，使用原始数值入口：
+
+```sh
+python infer_measurement.py --opju "钥匙(1).opju" --normalization minmax --weights runs/submission_snn_x2/model_best.pth --output results/key_x2
+```
+
+此入口同样接受原先根目录模型的协议checkpoint。它保留含负值的101×101矩阵，使用显式输入映射、三通道复制，按checkpoint倍率重建并逆映射回原始数值尺度，导出NPY/TSV和预览图。没有HR参考时不计算PSNR/SSIM。**min-max输入映射不等于物理透射率校准。**
+
+[详细命令、OPJU读取方式与配置一致性说明](docs/SUBMISSION_DIV2K_KEY.md)。
